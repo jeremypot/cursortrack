@@ -1,0 +1,16 @@
+# Python 3.10+ required (uses X | Y union type hints).
+#
+# Core dependencies — standard library only:
+#   sqlite3, json, pathlib, argparse, urllib, datetime, collections, re, html.parser
+#
+# Optional dependency for full model pricing scrape (recommended):
+#   playwright  — headless Chromium to render the React pricing page
+#
+# Install:
+#   pip install playwright
+#   python -m playwright install chromium
+#
+# Without playwright, fetch_cursor_pricing() falls back to RSC stream parsing
+# which captures Auto pool rates only ($1.25/$6.00 for the "default" key).
+
+playwright

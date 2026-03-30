@@ -1,0 +1,8 @@
+cursor-session.txt
+watcher.jsonl
+cursor-usage.json
+history.db
+history.db-wal
+history.db-shm
+__pycache__/
+*.pyc
