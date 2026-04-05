@@ -75,6 +75,25 @@ def find_git_root(path_str: str) -> str | None:
     return None
 
 
+def _find_child_git_root(folder: Path) -> Path | None:
+    """
+    If *folder* itself is not a git root, check its immediate subdirectories.
+    Handles the common case where a Cursor workspace folder wraps a single
+    git repo one level down (e.g. Evalucare/ containing evalucare/.git).
+    Returns the child git root, or None.
+    """
+    try:
+        if not folder.is_dir():
+            return None
+        candidates = [d for d in folder.iterdir()
+                      if d.is_dir() and (d / ".git").exists()]
+        if len(candidates) == 1:
+            return candidates[0]
+    except Exception:
+        pass
+    return None
+
+
 def _normalise_path(raw: str) -> Path | None:
     """
     Convert the odd path formats Cursor stores (/c:/Users/... or C:/Users/...)
@@ -801,7 +820,10 @@ def read_workspace_attribution() -> dict[str, str]:
 
         root = find_git_root(str(folder))
         if root is None:
-            root = str(folder)  # not a git repo, use folder itself
+            # Workspace folder may sit one level above the git repo
+            # (e.g. Evalucare/ workspace containing evalucare/ git repo).
+            child_git = _find_child_git_root(folder)
+            root = str(child_git) if child_git else str(folder)
 
         ws_db = ws_dir / "state.vscdb"
         if not ws_db.exists():
@@ -1130,6 +1152,53 @@ def init_history_db() -> sqlite3.Connection:
     return con
 
 
+def _normalize_repo_paths(con: sqlite3.Connection) -> int:
+    """
+    Consolidate split repo_path entries where a workspace folder and its child
+    git root both appear (e.g. .../evalucare and .../evalucare/evalucare).
+    Updates the non-git-root rows to point at the git root.
+    Returns the number of rows updated.
+    """
+    rows = con.execute(
+        "SELECT DISTINCT repo_path FROM conversations WHERE repo_path IS NOT NULL"
+    ).fetchall()
+    paths = [r[0] for r in rows if r[0] and r[0] != "__unattributed__"]
+
+    # Build lookup: normalised key → original path
+    by_key: dict[str, str] = {}
+    for p in paths:
+        by_key[repo_key(p)] = p
+
+    total = 0
+    merged: set[str] = set()
+    for key_a, path_a in sorted(by_key.items(), key=lambda x: len(x[0])):
+        if key_a in merged:
+            continue
+        for key_b, path_b in sorted(by_key.items(), key=lambda x: len(x[0])):
+            if key_a == key_b or key_b in merged:
+                continue
+            # Check if A is a parent of B (B is more specific / the git root)
+            if not key_b.startswith(key_a + "/"):
+                continue
+            # Verify B actually has .git
+            b_path = Path(path_b)
+            if not (b_path / ".git").exists():
+                continue
+            # A is the workspace parent, B is the git root — consolidate A → B
+            cur = con.execute(
+                "UPDATE conversations SET repo_path = ? WHERE repo_path = ?",
+                (path_b, path_a),
+            )
+            if cur.rowcount:
+                print(f"[normalize] Merged {cur.rowcount} rows: {path_a} -> {path_b}")
+                total += cur.rowcount
+                merged.add(key_a)
+
+    if total:
+        con.commit()
+    return total
+
+
 def sync_to_history(all_convs: list[dict], bubble_tokens: dict, prices: dict) -> tuple[int, int]:
     """
     Upsert conversations (and individual requests) into history.db.
@@ -1142,6 +1211,7 @@ def sync_to_history(all_convs: list[dict], bubble_tokens: dict, prices: dict) ->
     Returns (new_count, updated_count).
     """
     con = init_history_db()
+    _normalize_repo_paths(con)
     now_ms = int(time.time() * 1000)
 
     # Load existing snapshots for comparison
@@ -1356,18 +1426,52 @@ def build_report_from_history(
             if r["last_seen"] is None or ts2 > r["last_seen"]:
                 r["last_seen"] = ts2
 
-    # Serialise
+    # Merge repos that share the same display name (basename).  This handles
+    # the case where a Cursor workspace folder sits one level above the actual
+    # git root (e.g. Evalucare/ workspace containing evalucare/ git repo).
+    by_name: dict[str, list[tuple[str, dict]]] = defaultdict(list)
+    for k, r in repos.items():
+        by_name[Path(r["path"]).name].append((k, r))
+
     repos_out = {}
-    for k, r in sorted(repos.items(), key=lambda x: -x[1]["requests"]):
-        name = Path(r["path"]).name
-        entry = dict(r)
-        entry["attribution_layers"] = sorted(entry["attribution_layers"])
-        if entry["first_seen"]:
-            entry["first_seen"] = ms_to_dt(entry["first_seen"]).isoformat()
-        if entry["last_seen"]:
-            entry["last_seen"] = ms_to_dt(entry["last_seen"]).isoformat()
-        entry["estimated_cost_usd"] = round(entry["estimated_cost_usd"], 4)
-        repos_out[name] = entry
+    for name, entries in sorted(by_name.items(),
+                                key=lambda x: -sum(e[1]["requests"] for e in x[1])):
+        # Pick the canonical path: prefer the entry whose path is a git root
+        # (has files_edited > 0 or input_tokens > 0), otherwise the longest path.
+        canonical = max(entries,
+                        key=lambda e: (e[1]["files_edited"], e[1]["input_tokens"],
+                                       len(e[0])))[1]
+        merged = {
+            "path": canonical["path"],
+            "conversations": sum(e[1]["conversations"] for e in entries),
+            "requests": sum(e[1]["requests"] for e in entries),
+            "files_edited": sum(e[1]["files_edited"] for e in entries),
+            "input_tokens": sum(e[1]["input_tokens"] for e in entries),
+            "output_tokens": sum(e[1]["output_tokens"] for e in entries),
+            "estimated_cost_usd": round(
+                sum(e[1]["estimated_cost_usd"] for e in entries), 4),
+            "models": {},
+            "attribution_layers": set(),
+            "first_seen": None,
+            "last_seen": None,
+        }
+        for _, e in entries:
+            for m, cnt in e["models"].items():
+                merged["models"][m] = merged["models"].get(m, 0) + cnt
+            merged["attribution_layers"].update(e["attribution_layers"])
+            if e["first_seen"] is not None:
+                if merged["first_seen"] is None or e["first_seen"] < merged["first_seen"]:
+                    merged["first_seen"] = e["first_seen"]
+            if e["last_seen"] is not None:
+                if merged["last_seen"] is None or e["last_seen"] > merged["last_seen"]:
+                    merged["last_seen"] = e["last_seen"]
+
+        merged["attribution_layers"] = sorted(merged["attribution_layers"])
+        if merged["first_seen"]:
+            merged["first_seen"] = ms_to_dt(merged["first_seen"]).isoformat()
+        if merged["last_seen"]:
+            merged["last_seen"] = ms_to_dt(merged["last_seen"]).isoformat()
+        repos_out[name] = merged
 
     # Usage API summary
     api_summary: dict = {}

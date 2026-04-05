@@ -108,8 +108,8 @@
     "input": 2.0,
     "output": 6.0
   },
-  "_last_price_fetch": "2026-03-30T21:39:28.035371+00:00",
-  "_last_price_update": "2026-03-30T21:39:28.035371+00:00",
+  "_last_price_fetch": "2026-04-05T18:31:18.541044+00:00",
+  "_last_price_update": "2026-04-05T18:31:18.541044+00:00",
   "claude-4-sonnet": {
     "input": 3.0,
     "output": 15.0
