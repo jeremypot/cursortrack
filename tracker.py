@@ -178,246 +178,118 @@ def _parse_dollar(cell: str) -> float | None:
     return None
 
 
-def _rsc_tr_rows(rsc_section: str) -> list[list[str]]:
+
+def _fetch_pricing_md() -> dict | None:
     """
-    Extract text-content rows from RSC tr elements in the given text section.
+    Fetch pricing from https://cursor.com/docs/models-and-pricing.md
 
-    RSC element format: ["$","tr",null,{"children":[["$","td",null,{"children":"text"}],...]}]
-    Uses bracket counting to find each tr's exact boundary so adjacent rows
-    don't bleed into each other.
-    """
-    rows: list[list[str]] = []
-    pos = 0
-    while True:
-        start = rsc_section.find('["$","tr"', pos)
-        if start < 0:
-            break
-        # Walk forward counting brackets to find the end of this tr element
-        depth = 0
-        end = start
-        for i, ch in enumerate(rsc_section[start:], start):
-            if ch == "[":
-                depth += 1
-            elif ch == "]":
-                depth -= 1
-                if depth == 0:
-                    end = i + 1
-                    break
-        tr_src = rsc_section[start:end]
-        # Pull out "children":"<text>" values (skips nested arrays/objects)
-        texts = re.findall(r'"children":"([^"]+)"', tr_src)
-        # RSC escapes a literal $ as $$ — strip the leading $ prefix
-        texts = [t.lstrip("$") for t in texts if t]
-        if texts:
-            rows.append(texts)
-        pos = max(end, start + 1)
-    return rows
+    Cursor publishes a clean Markdown version of the pricing page that is
+    trivially parseable without a browser or RSC stream hacks.
 
+    Auto pool table (two-column):
+        | Token type          | Price per 1M tokens |
+        | Input + Cache Write | $1.25               |
+        | Output              | $6.00               |
 
-def _pw_extract_tables(page) -> list[list[list[str]]]:  # type: ignore[no-untyped-def]
-    """Extract all <table> elements from a Playwright page as list-of-rows."""
-    tables: list[list[list[str]]] = []
-    for tbl in page.query_selector_all("table"):
-        rows: list[list[str]] = []
-        for tr in tbl.query_selector_all("tr"):
-            cells = [td.inner_text().strip() for td in tr.query_selector_all("td,th")]
-            if any(cells):
-                rows.append(cells)
-        if rows:
-            tables.append(rows)
-    return tables
-
-
-def _fetch_pricing_playwright() -> dict | None:
-    """
-    Use a headless Chromium browser (Playwright) to fully render
-    cursor.com/docs/models-and-pricing and extract ALL pricing tables.
-
-    Table structure on the current page:
-      - Table 0: "Token type" | "Price per 1M tokens"  (auto pool rates)
-      - Table 1: "Name" | "Input" | "Cache Write" | "Cache Read" | "Output"  (Composer)
-      - Table 2: same header — premium routing models
-      - Table 3: Plans (ignored)
+    Model pricing table (multi-column, header contains "Model" and "Output"):
+        | Model | Provider | Input | Cache write | Cache read | Output | Notes |
+        | Claude 4.6 Sonnet | Anthropic | $3 | ... | ... | $15 | ... |
 
     Returns {"auto_pool": {input, output}, "models": {slug: {input, output}}}
     or None on failure.
     """
-    from playwright.sync_api import sync_playwright  # type: ignore[import]
-
-    url = "https://cursor.com/docs/models-and-pricing"
-    try:
-        with sync_playwright() as pw:
-            browser = pw.chromium.launch(headless=True)
-            page = browser.new_page(viewport={"width": 1280, "height": 900})
-            page.goto(url, wait_until="networkidle", timeout=30000)
-            page.wait_for_selector("table", timeout=15000)
-            page.wait_for_timeout(500)
-
-            # Click "Show more models" if present (expands the full model pricing table)
-            try:
-                show_more = page.get_by_role("button", name="Show more models")
-                if show_more.count() > 0:
-                    show_more.first.click()
-                    page.wait_for_timeout(1500)
-            except Exception:
-                pass
-
-            # Scroll the main content area to ensure all model rows are rendered
-            page.evaluate("""() => {
-                const main = document.getElementById('main-content') ||
-                             document.querySelector('main') ||
-                             document.body;
-                main.scrollTo(0, main.scrollHeight);
-            }""")
-            page.wait_for_timeout(500)
-
-            tables = _pw_extract_tables(page)
-            browser.close()
-    except Exception as exc:
-        print(f"[warn] Playwright fetch failed: {exc}")
-        return None
-
-    auto_pool: dict | None = None
-    models: dict[str, dict] = {}
-
-    for tbl_rows in tables:
-        if not tbl_rows:
-            continue
-        header = [c.lower() for c in tbl_rows[0]]
-
-        # Auto pool table: 2 columns — "Token type" | "Price per 1M tokens"
-        # Row labels contain "input"/"output"; columns do NOT.
-        if any("token" in h for h in header) and any("price" in h or "per 1m" in h for h in header):
-            price_idx = next((i for i, h in enumerate(header) if "price" in h or "per 1m" in h), 1)
-            for row in tbl_rows[1:]:
-                if len(row) <= price_idx:
-                    continue
-                label = row[0].lower()
-                val = _parse_dollar(row[price_idx])
-                if val is None:
-                    continue
-                if ("input" in label or "cache write" in label) and "cache read" not in label:
-                    auto_pool = auto_pool or {}
-                    auto_pool.setdefault("input", val)
-                elif "output" in label and "cache" not in label:
-                    auto_pool = auto_pool or {}
-                    auto_pool.setdefault("output", val)
-            continue
-
-        # Model pricing tables: "Name" | "Input" | ... | "Output"
-        name_idx = next((i for i, h in enumerate(header) if "name" in h or "model" in h), None)
-        inp_idx = next((i for i, h in enumerate(header) if h == "input" or h.startswith("input ")), None)
-        out_idx = next((i for i, h in enumerate(header) if h == "output" or h.startswith("output ")), None)
-
-        if name_idx is None or inp_idx is None or out_idx is None:
-            continue
-
-        for row in tbl_rows[1:]:
-            if len(row) <= max(name_idx, inp_idx, out_idx):
-                continue
-            name = row[name_idx].strip()
-            if not name or name.lower() == "name":
-                continue
-            inp = _parse_dollar(row[inp_idx])
-            out = _parse_dollar(row[out_idx])
-            if inp is not None and out is not None:
-                models[_pricing_slug(name)] = {"input": inp, "output": out}
-
-    if auto_pool is None and not models:
-        print("[warn] Playwright: no pricing data found in rendered tables")
-        return None
-
-    return {"auto_pool": auto_pool, "models": models}
-
-
-def _fetch_pricing_rsc() -> dict | None:
-    """
-    Fallback pricing fetch using the raw RSC stream (no JS execution).
-
-    The cursor.com docs page is Next.js App Router — the auto pool rates are
-    server-rendered in the __next_f.push() RSC payload and can be extracted
-    without a browser.  Model-specific rates live in a lazy client component
-    and are NOT available via this method; only auto_pool is returned.
-
-    Returns {"auto_pool": {input, output}, "models": {}} or None on failure.
-    """
-    url = "https://cursor.com/docs/models-and-pricing"
+    url = "https://cursor.com/docs/models-and-pricing.md"
     try:
         req = urllib.request.Request(
             url,
             headers={"User-Agent": "Mozilla/5.0 (compatible; cursortrack/1.0)"},
         )
         with urllib.request.urlopen(req, timeout=10) as resp:
-            html_src = resp.read().decode("utf-8", errors="replace")
+            md = resp.read().decode("utf-8", errors="replace")
     except Exception as exc:
-        print(f"[warn] Could not fetch cursor pricing page: {exc}")
+        print(f"[warn] Could not fetch {url}: {exc}")
         return None
 
-    rsc_text = ""
-    for chunk in re.findall(r'self\.__next_f\.push\(\[(.*?)\]\)', html_src, re.DOTALL):
-        m = re.match(r'\d+,"(.*)"$', chunk, re.DOTALL)
-        if m:
-            try:
-                rsc_text += json.loads('"' + m.group(1) + '"')
-            except Exception:
-                rsc_text += m.group(1)
+    def _parse_md_tables(text: str) -> list[list[list[str]]]:
+        """Return all Markdown tables as list of rows, each row a list of cells."""
+        tables: list[list[list[str]]] = []
+        current: list[list[str]] = []
+        for line in text.splitlines():
+            line = line.strip()
+            if line.startswith("|") and line.endswith("|"):
+                cells = [c.strip() for c in line.strip("|").split("|")]
+                # Skip separator rows (only dashes/colons)
+                if all(re.match(r"^[-: ]+$", c) for c in cells if c):
+                    continue
+                current.append(cells)
+            else:
+                if current:
+                    tables.append(current)
+                    current = []
+        if current:
+            tables.append(current)
+        return tables
 
-    if not rsc_text:
-        print("[warn] No RSC stream found on cursor pricing page")
+    tables = _parse_md_tables(md)
+    auto_pool: dict | None = None
+    models: dict[str, dict] = {}
+
+    for tbl in tables:
+        if not tbl:
+            continue
+        header = [c.lower() for c in tbl[0]]
+
+        # Auto pool table: 2 columns — "token type" | "price per 1m tokens"
+        if len(header) == 2 and "token" in header[0] and "price" in header[1]:
+            for row in tbl[1:]:
+                if len(row) < 2:
+                    continue
+                label = row[0].lower()
+                val = _parse_dollar(row[1])
+                if val is None:
+                    continue
+                if "input" in label or "cache write" in label:
+                    auto_pool = auto_pool or {}
+                    auto_pool.setdefault("input", val)
+                elif "output" in label:
+                    auto_pool = auto_pool or {}
+                    auto_pool.setdefault("output", val)
+            continue
+
+        # Model pricing table: has "model" and "output" columns
+        name_idx = next((i for i, h in enumerate(header) if h == "model"), None)
+        inp_idx  = next((i for i, h in enumerate(header) if h == "input"), None)
+        out_idx  = next((i for i, h in enumerate(header) if h == "output"), None)
+        if name_idx is None or inp_idx is None or out_idx is None:
+            continue
+
+        for row in tbl[1:]:
+            if len(row) <= max(name_idx, inp_idx, out_idx):
+                continue
+            # Strip Markdown link syntax: [Name](url) → Name
+            raw_name = re.sub(r"\[([^\]]+)\]\([^)]*\)", r"\1", row[name_idx]).strip()
+            if not raw_name or raw_name.lower() == "model":
+                continue
+            inp = _parse_dollar(row[inp_idx])
+            out = _parse_dollar(row[out_idx])
+            if inp is not None and out is not None:
+                models[_pricing_slug(raw_name)] = {"input": inp, "output": out}
+
+    if auto_pool is None and not models:
+        print("[warn] Markdown pricing: no data found — page format may have changed")
         return None
 
-    auto_section_start = rsc_text.lower().find("auto pricing")
-    if auto_section_start < 0:
-        print("[warn] 'Auto pricing' heading not found in RSC stream")
-        return None
-
-    section = rsc_text[auto_section_start: auto_section_start + 5000]
-    rows = _rsc_tr_rows(section)
-
-    auto_input: float | None = None
-    auto_output: float | None = None
-
-    for row in rows:
-        joined = " ".join(row).lower()
-        if "input" in joined or "cache write" in joined:
-            for cell in row:
-                v = _parse_dollar(cell)
-                if v is not None:
-                    auto_input = v
-                    break
-        elif "output" in joined and "cache" not in joined:
-            for cell in row:
-                v = _parse_dollar(cell)
-                if v is not None:
-                    auto_output = v
-                    break
-
-    if auto_input is None or auto_output is None:
-        print(
-            f"[warn] Could not extract auto pool rates from RSC stream "
-            f"(input={auto_input}, output={auto_output})"
-        )
-        return None
-
-    return {"auto_pool": {"input": auto_input, "output": auto_output}, "models": {}}
+    return {"auto_pool": auto_pool, "models": models}
 
 
 def fetch_cursor_pricing() -> dict | None:
     """
-    Fetch pricing from cursor.com/docs/models-and-pricing.
-
-    Tries Playwright first (full model table + auto pool rates).
-    Falls back to RSC stream parsing (auto pool only) if Playwright is not installed.
+    Fetch pricing from https://cursor.com/docs/models-and-pricing.md
 
     Returns {"auto_pool": {input, output}, "models": {slug: {input, output}}}
-    or None on complete failure.
+    or None on failure.
     """
-    try:
-        from playwright.sync_api import sync_playwright as _pw_check  # noqa: F401
-        return _fetch_pricing_playwright()
-    except ImportError:
-        print("[warn] playwright not installed — falling back to RSC-only fetch (auto pool rates only)")
-        return _fetch_pricing_rsc()
+    return _fetch_pricing_md()
 
 
 def update_prices_from_cursor(fetched: dict, prices: dict) -> tuple[dict, bool]:
@@ -704,11 +576,16 @@ def read_ai_tracking(since_ts_ms: int | None, bubble_tokens: dict) -> list[dict]
         cid = row["conversationId"]
         fn = row["fileName"]
         root = find_git_root(fn)
-        if root is None:
-            root = "__unattributed__"
 
         d = conv_files[cid]
-        d["roots"][repo_key(root)] += 1
+        # Only count files that resolve to a real git root.  Non-git paths
+        # (e.g. ~/.cursor/plans/, temp files) are tracked separately so they
+        # never out-vote a real repo via the __unattributed__ bucket.
+        if root is not None:
+            d["roots"][repo_key(root)] += 1
+        else:
+            d.setdefault("unresolved_files", 0)
+            d["unresolved_files"] = d.get("unresolved_files", 0) + 1
         d["model"] = row["model"] or d["model"]
         if row["requestId"]:
             d["request_ids"].add(row["requestId"])
@@ -721,8 +598,13 @@ def read_ai_tracking(since_ts_ms: int | None, bubble_tokens: dict) -> list[dict]
 
     results = []
     for cid, d in conv_files.items():
-        dominant_key = max(d["roots"], key=d["roots"].__getitem__)
-        real_root = _find_real_root(dominant_key) or dominant_key
+        if d["roots"]:
+            dominant_key = max(d["roots"], key=d["roots"].__getitem__)
+            real_root = _find_real_root(dominant_key) or dominant_key
+        else:
+            # All files were in non-git paths (e.g. ~/.cursor/plans/)
+            dominant_key = "__unattributed__"
+            real_root = "__unattributed__"
 
         # Input tokens: sum contextWindowStatus per request; fall back to conv total
         input_tokens = sum(
@@ -778,6 +660,61 @@ def _find_real_root(key: str) -> str | None:
 
 # ── layer 1b: workspace SQLite attribution ────────────────────────────────────
 
+def _root_from_code_workspace(ws_file: Path) -> str:
+    """
+    Given a path to a .code-workspace file, return the best git root to use
+    as the attribution label for conversations opened in that workspace.
+
+    Strategy (in order):
+      1. If all folders share a single common git root → return that root.
+      2. If exactly one folder has a git root → return it.
+      3. Otherwise → return the workspace file stem (e.g. "myproject" for
+         "myproject.code-workspace") so costs land on a named bucket instead
+         of the unattributed pool.
+
+    If the .code-workspace file cannot be read, still falls back to the stem.
+    """
+    label = ws_file.stem or str(ws_file)  # last-resort name
+
+    if not ws_file.exists():
+        return label
+
+    try:
+        ws_data = json.loads(ws_file.read_text(encoding="utf-8"))
+    except Exception:
+        return label
+
+    git_roots: list[str] = []
+    for entry in ws_data.get("folders", []):
+        raw = entry.get("path") or entry.get("uri")
+        if not raw:
+            continue
+        # Paths may be absolute or relative to the .code-workspace file's directory
+        p = _normalise_path(raw)
+        if p is None:
+            continue
+        if not p.is_absolute():
+            p = ws_file.parent / p
+        gr = find_git_root(str(p))
+        if gr and gr not in git_roots:
+            git_roots.append(gr)
+
+    if not git_roots:
+        return label
+
+    # All folders resolve to the same git root
+    if len(git_roots) == 1:
+        return git_roots[0]
+
+    # Check whether all roots nest under a common ancestor git root
+    common = find_git_root(git_roots[0])
+    if common and all(r.lower().startswith(common.lower()) for r in git_roots):
+        return common
+
+    # Truly multi-repo workspace: use the workspace file name as the bucket
+    return label
+
+
 def read_workspace_attribution() -> dict[str, str]:
     """
     Scan every workspaceStorage/*/state.vscdb.
@@ -786,13 +723,15 @@ def read_workspace_attribution() -> dict[str, str]:
     composerId values are the same conversation IDs used in bubbleId keys and
     ai_code_hashes.conversationId.  Paired with the folder path from
     workspace.json, this gives an exact conversationId → git_root mapping for
-    all conversations that were opened in a single-folder workspace — no live
-    watcher required.
+    all conversations that were opened in a workspace — no live watcher required.
 
-    For multi-root workspaces (workspace.json points to a .code-workspace file
-    rather than a folder), the mapping is skipped since the root is ambiguous.
+    Single-folder workspaces: resolved to their git root directly.
+    Multi-root workspaces: _root_from_code_workspace() reads the .code-workspace
+    file and returns the shared git root if all folders share one, or the
+    workspace file stem (e.g. "myproject") so costs land on a named bucket
+    rather than the unattributed pool.
 
-    Returns: { conversationId -> git_root_path }
+    Returns: { conversationId -> git_root_or_workspace_label }
     """
     if not WS_STORAGE.exists():
         return {}
@@ -806,24 +745,33 @@ def read_workspace_attribution() -> dict[str, str]:
         # Resolve workspace folder from workspace.json
         wj = ws_dir / "workspace.json"
         folder: Path | None = None
+        root: str | None = None
         if wj.exists():
             try:
-                data = json.loads(wj.read_text(encoding="utf-8"))
-                uri = data.get("folder")  # present only for single-folder workspaces
+                wj_data = json.loads(wj.read_text(encoding="utf-8"))
+                uri = wj_data.get("folder")  # present only for single-folder workspaces
                 if uri:
                     folder = decode_vscode_uri(uri)
+                else:
+                    # Multi-root workspace: "workspace" key points to a .code-workspace file.
+                    ws_uri = wj_data.get("workspace")
+                    if ws_uri:
+                        ws_file = decode_vscode_uri(ws_uri)
+                        if ws_file:
+                            root = _root_from_code_workspace(ws_file)
             except Exception:
                 pass
 
-        if folder is None:
-            continue  # multi-root or missing workspace.json — skip
+        if folder is None and root is None:
+            continue  # missing workspace.json — skip
 
-        root = find_git_root(str(folder))
         if root is None:
-            # Workspace folder may sit one level above the git repo
-            # (e.g. Evalucare/ workspace containing evalucare/ git repo).
-            child_git = _find_child_git_root(folder)
-            root = str(child_git) if child_git else str(folder)
+            # Single-folder workspace: resolve to git root as before.
+            assert folder is not None
+            root = find_git_root(str(folder))
+            if root is None:
+                child_git = _find_child_git_root(folder)
+                root = str(child_git) if child_git else str(folder)
 
         ws_db = ws_dir / "state.vscdb"
         if not ws_db.exists():
@@ -843,9 +791,23 @@ def read_workspace_attribution() -> dict[str, str]:
 
         try:
             data = json.loads(row[0])
-            for comp in data.get("allComposers", []):
-                cid = comp.get("composerId")
-                if cid and cid not in result:
+            # Old schema: allComposers is a list of {composerId, ...} objects
+            # New schema (post-migration): selectedComposerIds + lastFocusedComposerIds
+            #   are flat lists of UUIDs covering only the currently-open composers.
+            cids: list[str] = []
+            all_composers = data.get("allComposers")
+            if all_composers:
+                cids = [c.get("composerId") for c in all_composers
+                        if isinstance(c, dict) and c.get("composerId")]
+            else:
+                seen: set[str] = set()
+                for key in ("selectedComposerIds", "lastFocusedComposerIds"):
+                    for cid in (data.get(key) or []):
+                        if cid and cid not in seen:
+                            seen.add(cid)
+                            cids.append(cid)
+            for cid in cids:
+                if cid not in result:
                     result[cid] = root
         except Exception:
             continue
@@ -913,7 +875,12 @@ def read_bubbles(
             try:
                 created_at = int(created_at)
             except (TypeError, ValueError):
-                created_at = None
+                # Cursor sometimes stores ISO 8601 strings instead of ms epochs
+                try:
+                    dt = datetime.fromisoformat(str(created_at).replace("Z", "+00:00"))
+                    created_at = int(dt.timestamp() * 1000)
+                except Exception:
+                    created_at = None
         if since_ts_ms and created_at and created_at < since_ts_ms:
             continue
 
@@ -1149,6 +1116,12 @@ def init_history_db() -> sqlite3.Connection:
         CREATE INDEX IF NOT EXISTS idx_req_conv_id   ON requests(conv_id);
         CREATE INDEX IF NOT EXISTS idx_req_created   ON requests(created_at);
     """)
+    # Migration: add account_email column for existing databases
+    try:
+        con.execute("ALTER TABLE conversations ADD COLUMN account_email TEXT")
+        con.commit()
+    except sqlite3.OperationalError:
+        pass  # column already exists
     return con
 
 
@@ -1205,7 +1178,8 @@ def sync_to_history(all_convs: list[dict], bubble_tokens: dict, prices: dict) ->
 
     A conversation is upserted when:
       - it is not yet in history.db, OR
-      - its input_tokens or output_tokens have increased since last sync
+      - its input_tokens or output_tokens have increased since last sync, OR
+      - it was previously __unattributed__ but now has a real repo_path
         (conversations can accumulate tokens as a session progresses).
 
     Returns (new_count, updated_count).
@@ -1214,10 +1188,13 @@ def sync_to_history(all_convs: list[dict], bubble_tokens: dict, prices: dict) ->
     _normalize_repo_paths(con)
     now_ms = int(time.time() * 1000)
 
-    # Load existing snapshots for comparison
+    # Read the currently logged-in Cursor account (single cached value in state.vscdb)
+    account_email: str | None = fetch_subscription_info(None).get("email") or None
+
+    # Load existing snapshots for comparison (include repo_path and first_ts to detect changes)
     existing = {
-        row["conv_id"]: (row["input_tokens"] or 0, row["output_tokens"] or 0)
-        for row in con.execute("SELECT conv_id, input_tokens, output_tokens FROM conversations")
+        row["conv_id"]: (row["input_tokens"] or 0, row["output_tokens"] or 0, row["repo_path"], row["first_ts"])
+        for row in con.execute("SELECT conv_id, input_tokens, output_tokens, repo_path, first_ts FROM conversations")
     }
 
     new_count = updated_count = 0
@@ -1231,6 +1208,7 @@ def sync_to_history(all_convs: list[dict], bubble_tokens: dict, prices: dict) ->
         out = conv.get("output_tokens", 0) or 0
         model = conv.get("model", "unknown") or "unknown"
         requests = conv.get("requests", 0) or 0
+        new_repo = conv.get("repo_path")
 
         # Effective output: delta if available, else flat estimate
         eff_out = out if out > 0 else requests * avg_output_tokens(prices)
@@ -1240,8 +1218,12 @@ def sync_to_history(all_convs: list[dict], bubble_tokens: dict, prices: dict) ->
         )
 
         if cid in existing:
-            old_inp, old_out = existing[cid]
-            if inp <= old_inp and out <= old_out:
+            old_inp, old_out, old_repo, old_ts = existing[cid]
+            was_unattributed = old_repo in ("__unattributed__", None)
+            now_attributed = new_repo and new_repo != "__unattributed__"
+            new_ts = conv.get("first_ts")
+            ts_gained = old_ts is None and new_ts is not None
+            if inp <= old_inp and out <= old_out and not (was_unattributed and now_attributed) and not ts_gained:
                 continue  # no change — skip
             updated_count += 1
         else:
@@ -1252,8 +1234,8 @@ def sync_to_history(all_convs: list[dict], bubble_tokens: dict, prices: dict) ->
             INSERT INTO conversations
                 (conv_id, repo_path, layer, model, first_ts, last_ts,
                  requests, files_edited, input_tokens, output_tokens,
-                 has_real_input, estimated_cost_usd, synced_at)
-            VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)
+                 has_real_input, estimated_cost_usd, synced_at, account_email)
+            VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)
             ON CONFLICT(conv_id) DO UPDATE SET
                 repo_path          = excluded.repo_path,
                 layer              = excluded.layer,
@@ -1282,6 +1264,7 @@ def sync_to_history(all_convs: list[dict], bubble_tokens: dict, prices: dict) ->
                 1 if conv.get("has_real_input") else 0,
                 round(cost, 6),
                 now_ms,
+                account_email,
             ),
         )
 
@@ -1380,6 +1363,8 @@ def build_report_from_history(
                 "first_seen": None,
                 "last_seen": None,
                 "attribution_layers": set(),
+                "account_emails": set(),
+                "account_breakdown": {},
             }
         return repos[k]
 
@@ -1417,6 +1402,20 @@ def build_report_from_history(
         r["models"][model] = r["models"].get(model, 0) + 1
         r["attribution_layers"].add(row["layer"] or "unknown")
 
+        ae = row["account_email"] if "account_email" in row.keys() else None
+        if ae:
+            r["account_emails"].add(ae)
+            ab = r["account_breakdown"].setdefault(ae, {
+                "conversations": 0, "requests": 0, "files_edited": 0,
+                "input_tokens": 0, "output_tokens": 0, "estimated_cost_usd": 0.0,
+            })
+            ab["conversations"] += 1
+            ab["requests"] += reqs
+            ab["files_edited"] += row["files_edited"] or 0
+            ab["input_tokens"] += inp
+            ab["output_tokens"] += out
+            ab["estimated_cost_usd"] += cost
+
         ts1 = row["first_ts"]
         ts2 = row["last_ts"]
         if ts1:
@@ -1452,6 +1451,8 @@ def build_report_from_history(
                 sum(e[1]["estimated_cost_usd"] for e in entries), 4),
             "models": {},
             "attribution_layers": set(),
+            "account_emails": set(),
+            "account_breakdown": {},
             "first_seen": None,
             "last_seen": None,
         }
@@ -1459,6 +1460,18 @@ def build_report_from_history(
             for m, cnt in e["models"].items():
                 merged["models"][m] = merged["models"].get(m, 0) + cnt
             merged["attribution_layers"].update(e["attribution_layers"])
+            merged["account_emails"].update(e.get("account_emails", set()))
+            for email, stats in e.get("account_breakdown", {}).items():
+                ab = merged["account_breakdown"].setdefault(email, {
+                    "conversations": 0, "requests": 0, "files_edited": 0,
+                    "input_tokens": 0, "output_tokens": 0, "estimated_cost_usd": 0.0,
+                })
+                ab["conversations"] += stats["conversations"]
+                ab["requests"] += stats["requests"]
+                ab["files_edited"] += stats["files_edited"]
+                ab["input_tokens"] += stats["input_tokens"]
+                ab["output_tokens"] += stats["output_tokens"]
+                ab["estimated_cost_usd"] += stats["estimated_cost_usd"]
             if e["first_seen"] is not None:
                 if merged["first_seen"] is None or e["first_seen"] < merged["first_seen"]:
                     merged["first_seen"] = e["first_seen"]
@@ -1467,6 +1480,11 @@ def build_report_from_history(
                     merged["last_seen"] = e["last_seen"]
 
         merged["attribution_layers"] = sorted(merged["attribution_layers"])
+        merged["account_emails"] = sorted(
+            e for e in merged["account_emails"] if e
+        )
+        for ab in merged["account_breakdown"].values():
+            ab["estimated_cost_usd"] = round(ab["estimated_cost_usd"], 4)
         if merged["first_seen"]:
             merged["first_seen"] = ms_to_dt(merged["first_seen"]).isoformat()
         if merged["last_seen"]:
@@ -1681,6 +1699,20 @@ def main() -> None:
             print(f"[tracker]   -> No rate changes")
     else:
         print(f"[tracker]   -> Fetch failed — using cached prices.json")
+
+    # Apply workspace attribution to any Layer 1 (commit-linked) conversations
+    # that ended up unattributed.  Layer 1 builds known_ids to skip in Layer 2,
+    # but workspace attribution was never applied to Layer 1 — fix that here.
+    ws_reattr = 0
+    for conv in layer1:
+        if conv["repo_path"] == "__unattributed__":
+            cid = conv["conversationId"]
+            if cid in workspace_attr:
+                conv["repo_path"] = workspace_attr[cid]
+                conv["layer"] = "workspace-sqlite"
+                ws_reattr += 1
+    if ws_reattr:
+        print(f"[tracker]   -> {ws_reattr} Layer-1 unattributed re-attributed via workspace SQLite")
 
     # Apply watcher fallback before syncing so the layer is recorded
     all_convs = layer1 + layer2

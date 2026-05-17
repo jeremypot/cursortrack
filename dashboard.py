@@ -215,13 +215,14 @@ HTML = r"""<!DOCTYPE html>
 
   /* ── project filter panel ── */
   .proj-filter-wrap { position: relative; }
-  #projFilterBtn {
+  #projFilterBtn, #accountFilterBtn {
     display: flex; align-items: center; gap: 6px;
     padding: 5px 12px; border-radius: 7px;
     border: 1px solid var(--border); background: var(--surface2);
     color: var(--text); font-size: 12px; font-weight: 600; cursor: pointer;
   }
   #projFilterBtn:hover { background: var(--surface); }
+  #accountFilterBtn:hover { background: var(--surface); }
   #projFilterBtn .badge-count {
     background: var(--accent2); color: #fff; border-radius: 10px;
     padding: 1px 6px; font-size: 10px; font-weight: 700;
@@ -260,6 +261,24 @@ HTML = r"""<!DOCTYPE html>
   #dailyChartWrap svg { width: 100%; display: block; }
   #dailyChartWrap .no-data { color: var(--muted); font-size: 13px; padding: 18px 0; }
 
+  /* ── account tag ── */
+  .tag.account { color: var(--accent2); border-color: var(--accent2); font-size: 10px; }
+
+  /* ── warning banner ── */
+  .warning-banner {
+    display: flex; align-items: flex-start; gap: 10px;
+    background: rgba(255, 200, 60, 0.12); border: 1px solid rgba(255, 200, 60, 0.4);
+    border-radius: var(--radius); padding: 10px 14px; margin-bottom: 16px;
+    font-size: 12px; color: var(--text); line-height: 1.5;
+  }
+  .warning-banner .warn-icon { font-size: 15px; flex-shrink: 0; margin-top: 1px; }
+  .warning-banner .warn-text { flex: 1; }
+  .warning-banner .warn-close {
+    background: none; border: none; cursor: pointer; color: var(--muted);
+    font-size: 14px; padding: 0; flex-shrink: 0; line-height: 1;
+  }
+  .warning-banner .warn-close:hover { color: var(--text); }
+
   /* ── PDF / print ── */
   #exportPdfBtn {
     display: flex; align-items: center; gap: 6px;
@@ -275,8 +294,8 @@ HTML = r"""<!DOCTYPE html>
 
     /* hide interactive chrome */
     header, .filter-bar, .date-range-picker, .gen-at, details, #toast,
-    #refreshBtn, #exportPdfBtn, #projFilterBtn, .rates-wrap,
-    .daily-legend { display: none !important; }
+    #refreshBtn, #exportPdfBtn, #projFilterBtn, #accountFilterBtn, .rates-wrap,
+    .daily-legend, .warning-banner { display: none !important; }
 
     main { max-width: 100% !important; padding: 0 !important; }
     .print-header { display: block !important; margin-bottom: 18px; }
@@ -321,6 +340,7 @@ HTML = r"""<!DOCTYPE html>
     .card-footer { margin-top: 8px !important; }
     .tag { background: #efefef !important; border: 1px solid #ccc !important; color: #444 !important; }
     .tag.model { background: #e8f0ff !important; border-color: #b3c8f0 !important; color: #2a4a8a !important; }
+    .tag.account { background: #f0e8ff !important; border-color: #c8b0f0 !important; color: #4a2a8a !important; }
     .dates { color: #888 !important; }
   }
 
@@ -480,6 +500,16 @@ HTML = r"""<!DOCTYPE html>
 
   .dates { font-size: 11px; color: var(--muted); margin-left: auto; text-align: right; }
 
+  /* ── account attribution bar ── */
+  .acct-bar { display: flex; flex-direction: column; gap: 4px; }
+  .acct-bar-row { display: flex; align-items: center; gap: 6px; font-size: 11px; }
+  .acct-bar-label { color: var(--text2); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 160px; flex-shrink: 1; }
+  .acct-bar-pct { color: var(--muted); font-weight: 700; min-width: 34px; text-align: right; flex-shrink: 0; }
+  .acct-bar-track { flex: 1; height: 5px; background: var(--border); border-radius: 3px; overflow: hidden; min-width: 40px; }
+  .acct-bar-fill { height: 100%; border-radius: 3px; background: var(--accent2); transition: width .3s; }
+  .acct-bar-fill:nth-child(1) { background: var(--accent2); }
+  .card.card-account-split .card-path { color: var(--accent2); font-weight: 600; }
+
   /* ── unattributed & notes ── */
   details {
     background: var(--surface);
@@ -605,6 +635,12 @@ HTML = r"""<!DOCTYPE html>
     <div id="printMeta" style="font-size:12px;color:#555"></div>
   </div>
 
+  <div class="warning-banner" id="accountWarning">
+    <span class="warn-icon">&#9432;</span>
+    <span class="warn-text">Account attribution is only accurate if a sync was run before switching Cursor accounts. Conversations synced after an account switch may be tagged to the wrong account.</span>
+    <button class="warn-close" onclick="dismissAccountWarning()" title="Dismiss">&#x2715;</button>
+  </div>
+
   <div class="filter-bar" id="filterBar">
     <span class="filter-label">Period</span>
     <button class="filter-btn active" data-filter="all"    onclick="applyFilter(this)">All time</button>
@@ -625,6 +661,21 @@ HTML = r"""<!DOCTYPE html>
         <div id="projPanelItems"></div>
       </div>
     </div>
+    <div class="proj-filter-wrap" id="accountFilterWrap" style="display:none">
+      <button id="accountFilterBtn" onclick="toggleAccountPanel(event)">
+        &#64; Account <span class="badge-count" id="accountBadge" style="display:none"></span>
+      </button>
+      <div class="proj-panel" id="accountPanel">
+        <div class="proj-panel-header">
+          <span>Filter by account</span>
+          <button onclick="showAllAccounts()">Show all</button>
+        </div>
+        <div id="accountPanelItems"></div>
+      </div>
+    </div>
+    <button id="splitAcctBtn" class="filter-btn" onclick="toggleSplitByAccount()" title="Show one card per account per project">
+      Split by account
+    </button>
     <button id="exportPdfBtn" onclick="doExportPdf()">
       <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
         <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/>
@@ -810,16 +861,97 @@ document.addEventListener('click', e => {
   const wrap = document.getElementById('projFilterWrap');
   if (wrap && !wrap.contains(e.target))
     document.getElementById('projPanel').classList.remove('open');
+  const awrap = document.getElementById('accountFilterWrap');
+  if (awrap && !awrap.contains(e.target))
+    document.getElementById('accountPanel').classList.remove('open');
 });
 
-// ── daily chart ───────────────────────────────────────────────────────────────
+// ── account filter helpers ─────────────────────────────────────────────────────
+const _hiddenAccounts = new Set(
+  JSON.parse(localStorage.getItem('hiddenAccounts') || '[]')
+);
+
+function saveHiddenAccounts() {
+  localStorage.setItem('hiddenAccounts', JSON.stringify([..._hiddenAccounts]));
+}
+
+function toggleAccountPanel(e) {
+  e.stopPropagation();
+  document.getElementById('accountPanel').classList.toggle('open');
+}
+
+function showAllAccounts() {
+  _hiddenAccounts.clear();
+  saveHiddenAccounts();
+  if (_lastRawData) render(_lastRawData);
+}
+
+function toggleAccount(email, checked) {
+  if (checked) _hiddenAccounts.delete(email);
+  else         _hiddenAccounts.add(email);
+  saveHiddenAccounts();
+  if (_lastRawData) render(_lastRawData);
+}
+
+function buildAccountPanel(allAccounts) {
+  const wrap = document.getElementById('accountFilterWrap');
+  if (!allAccounts || !allAccounts.length) {
+    wrap.style.display = 'none';
+    return;
+  }
+  wrap.style.display = '';
+  const items = allAccounts.map(email => {
+    const checked = !_hiddenAccounts.has(email);
+    const safe = email.replace(/\\/g, '\\\\').replace(/'/g, "\\'");
+    return `<div class="proj-panel-item">
+      <input type="checkbox" id="ac_${email}" ${checked ? 'checked' : ''}
+             onchange="toggleAccount('${safe}', this.checked)">
+      <label for="ac_${email}">${email}</label>
+    </div>`;
+  }).join('');
+  document.getElementById('accountPanelItems').innerHTML =
+    items || '<div style="padding:10px 14px;color:var(--muted);font-size:12px">No accounts</div>';
+  const hidCount = _hiddenAccounts.size;
+  const badge = document.getElementById('accountBadge');
+  badge.textContent = hidCount;
+  badge.style.display = hidCount ? '' : 'none';
+}
+
+function dismissAccountWarning() {
+  localStorage.setItem('accountWarningDismissed', '1');
+  document.getElementById('accountWarning').style.display = 'none';
+}
+
+// Restore dismissed state on load
+if (localStorage.getItem('accountWarningDismissed') === '1') {
+  const el = document.getElementById('accountWarning');
+  if (el) el.style.display = 'none';
+}
+
+// ── split-by-account toggle ────────────────────────────────────────────────
+let _splitByAccount = localStorage.getItem('splitByAccount') === '1';
+
+function toggleSplitByAccount() {
+  _splitByAccount = !_splitByAccount;
+  localStorage.setItem('splitByAccount', _splitByAccount ? '1' : '0');
+  document.getElementById('splitAcctBtn').classList.toggle('active', _splitByAccount);
+  if (_lastRawData) render(_lastRawData);
+}
+
+// Set initial button state
+window.addEventListener('DOMContentLoaded', () => {
+  document.getElementById('splitAcctBtn').classList.toggle('active', _splitByAccount);
+});
+
 let _lastDailyData = null;
 
 async function loadDailyData() {
   try {
+    const tzOffset = -new Date().getTimezoneOffset(); // browser UTC offset in minutes (e.g. -420 for PDT)
+    const base = { tzOffset };
     const body = _customRange
-      ? JSON.stringify({ from: _customRange.from, until: _customRange.until })
-      : JSON.stringify({});
+      ? JSON.stringify({ ...base, from: _customRange.from, until: _customRange.until })
+      : JSON.stringify(base);
     const res = await fetch('/api/daily', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -916,9 +1048,27 @@ function render(data) {
   const allCosts = {};
   Object.entries(allRepos).forEach(([n, r]) => { allCosts[n] = r.estimated_cost_usd || 0; });
 
-  // Apply visibility filter
+  // Collect all distinct account emails across all repos
+  const allAccounts = [...new Set(
+    Object.values(allRepos).flatMap(r => r.account_emails || []).filter(Boolean)
+  )].sort();
+  buildAccountPanel(allAccounts);
+
+  // Show/hide the split-by-account button based on whether multiple accounts exist
+  const anyMultiAccount = Object.values(allRepos).some(r => (r.account_breakdown ? Object.keys(r.account_breakdown).length : (r.account_emails || []).length) > 1);
+  const splitBtn = document.getElementById('splitAcctBtn');
+  if (splitBtn) splitBtn.style.display = anyMultiAccount ? '' : 'none';
+
+  // Apply visibility filter (project + account)
   const repos = Object.fromEntries(
-    Object.entries(allRepos).filter(([n]) => !_hiddenProjects.has(n))
+    Object.entries(allRepos).filter(([n, r]) => {
+      if (_hiddenProjects.has(n)) return false;
+      if (_hiddenAccounts.size > 0) {
+        const emails = (r.account_emails || []).filter(Boolean);
+        if (emails.length > 0 && emails.every(e => _hiddenAccounts.has(e))) return false;
+      }
+      return true;
+    })
   );
 
   // Recalculate totals from visible repos only
@@ -985,38 +1135,88 @@ function render(data) {
   if (_lastDailyData) renderDailyChart(_lastDailyData, _hiddenProjects);
 
   // Repo cards
-  document.getElementById('cardsGrid').innerHTML = Object.entries(repos).map(([name, r], i) => {
+  const ACCT_COLORS = ['var(--accent2)', 'var(--accent)', 'var(--yellow)', 'var(--green)', 'var(--muted)'];
+
+  function buildCard(name, r, opts) {
+    // opts: { accountEmail, accountStats } when in split view for a specific account
+    const isAccountSplit = !!opts && !!opts.accountEmail;
+    const stats = isAccountSplit ? opts.accountStats : r;
     const layers = (r.attribution_layers || []).map(attrTag).join('');
     const models = Object.keys(r.models || {}).map(m => {
       const label = (m === 'default' || m === 'unknown')
         ? 'Auto' : m.replace('claude-','').replace('gpt-','');
       return `<span class="tag model">${label}</span>`;
     }).join('');
-    const cost = r.estimated_cost_usd > 0
-      ? fmtCost(r.estimated_cost_usd)
+
+    const cost = (stats.estimated_cost_usd || 0) > 0
+      ? fmtCost(stats.estimated_cost_usd)
       : '<span style="color:var(--muted)">n/a</span>';
-    return `<div class="card">
+
+    // Attribution bar — shown only in combined view when >1 account has breakdown data
+    let attrBarHtml = '';
+    const breakdown = r.account_breakdown || {};
+    const breakdownEntries = Object.entries(breakdown).filter(([, s]) => s.estimated_cost_usd > 0);
+    if (!isAccountSplit && breakdownEntries.length > 1) {
+      const totalCost = breakdownEntries.reduce((sum, [, s]) => sum + s.estimated_cost_usd, 0);
+      attrBarHtml = `<div class="acct-bar">` +
+        breakdownEntries.map(([email, s], idx) => {
+          const pct = totalCost > 0 ? Math.round((s.estimated_cost_usd / totalCost) * 100) : 0;
+          const color = ACCT_COLORS[idx % ACCT_COLORS.length];
+          return `<div class="acct-bar-row">
+            <span class="acct-bar-label" title="${email}">&#64; ${email}</span>
+            <span class="acct-bar-pct">${pct}%</span>
+            <div class="acct-bar-track"><div class="acct-bar-fill" style="width:${pct}%;background:${color}"></div></div>
+          </div>`;
+        }).join('') +
+        `</div>`;
+    }
+
+    // Footer account tags — in split view show only current account, otherwise all
+    let accountTags;
+    if (isAccountSplit) {
+      accountTags = `<span class="tag account" title="Cursor account">&#64; ${opts.accountEmail}</span>`;
+    } else {
+      accountTags = (r.account_emails || []).filter(Boolean).map(e =>
+        `<span class="tag account" title="Cursor account">&#64; ${e}</span>`
+      ).join('');
+    }
+
+    const subtitle = isAccountSplit
+      ? `<div class="card-path" style="color:var(--accent2);font-weight:600">&#64; ${opts.accountEmail}</div>`
+      : `<div class="card-path">${r.path || ''}</div>`;
+
+    return `<div class="card${isAccountSplit ? ' card-account-split' : ''}">
       <div class="card-header">
         <div class="card-icon">&#128193;</div>
         <div>
           <div class="card-title">${name}</div>
-          <div class="card-path">${r.path || ''}</div>
+          ${subtitle}
         </div>
       </div>
       <div class="card-cost">${cost} <small>estimated</small></div>
+      ${attrBarHtml}
       <div class="stat-grid">
-        <div class="stat"><div class="s-label">Conversations</div><div class="s-value">${fmt(r.conversations)}</div></div>
-        <div class="stat"><div class="s-label">Requests</div><div class="s-value">${fmt(r.requests)}</div></div>
-        <div class="stat"><div class="s-label">Input tokens</div><div class="s-value">${fmt(r.input_tokens)}</div></div>
-        <div class="stat"><div class="s-label">Output tokens</div><div class="s-value">${fmt(r.output_tokens)}</div></div>
-        <div class="stat"><div class="s-label">Files edited</div><div class="s-value">${fmt(r.files_edited)}</div></div>
+        <div class="stat"><div class="s-label">Conversations</div><div class="s-value">${fmt(stats.conversations)}</div></div>
+        <div class="stat"><div class="s-label">Requests</div><div class="s-value">${fmt(stats.requests)}</div></div>
+        <div class="stat"><div class="s-label">Input tokens</div><div class="s-value">${fmt(stats.input_tokens)}</div></div>
+        <div class="stat"><div class="s-label">Output tokens</div><div class="s-value">${fmt(stats.output_tokens)}</div></div>
+        <div class="stat"><div class="s-label">Files edited</div><div class="s-value">${fmt(stats.files_edited)}</div></div>
         <div class="stat"><div class="s-label">Last active</div><div class="s-value" style="font-size:12px">${fmtDate(r.last_seen)}</div></div>
       </div>
       <div class="card-footer">
-        ${layers}${models}
+        ${layers}${models}${accountTags}
         ${r.first_seen ? `<span class="dates">${fmtDate(r.first_seen)}<br>&#8594; ${fmtDate(r.last_seen)}</span>` : ''}
       </div>
     </div>`;
+  }
+
+  document.getElementById('cardsGrid').innerHTML = Object.entries(repos).flatMap(([name, r]) => {
+    const breakdown = r.account_breakdown || {};
+    const breakdownEntries = Object.entries(breakdown);
+    if (_splitByAccount && breakdownEntries.length > 1) {
+      return breakdownEntries.map(([email, stats]) => buildCard(name, r, { accountEmail: email, accountStats: stats }));
+    }
+    return [buildCard(name, r, null)];
   }).join('');
 
   // Unattributed
@@ -1041,9 +1241,13 @@ function render(data) {
   const activeBtn = document.querySelector('.filter-btn.active');
   const period    = activeBtn ? activeBtn.textContent.trim() : 'All time';
   const hidInfo   = _hiddenProjects.size ? ` \u00b7 ${_hiddenProjects.size} project(s) hidden` : '';
+  const acctInfo  = _hiddenAccounts.size && allAccounts.length
+    ? `<br>Account filter: <strong>${allAccounts.filter(a => !_hiddenAccounts.has(a)).join(', ') || 'none'}</strong>`
+    : (allAccounts.length ? `<br>Accounts: <strong>${allAccounts.join(', ')}</strong>` : '');
   document.getElementById('printMeta').innerHTML =
     `Period: <strong>${period}</strong>${hidInfo}<br>` +
-    `Projects: <strong>${Object.keys(repos).join(', ') || 'none'}</strong><br>` +
+    `Projects: <strong>${Object.keys(repos).join(', ') || 'none'}</strong>` +
+    acctInfo + `<br>` +
     `Generated: ${data.generated_at ? new Date(data.generated_at).toLocaleString() : '\u2014'}`;
 }
 
@@ -1284,9 +1488,19 @@ def run_tracker(extra_args: list[str] | None = None) -> dict:
     return json.loads(DATA_FILE.read_text(encoding="utf-8"))
 
 
-def _daily_data(from_date: str | None, until_date: str | None) -> dict:
+def _daily_data(from_date: str | None, until_date: str | None, tz_offset_min: int = 0) -> dict:
     """
     Query history.db for per-day, per-repo estimated cost.
+
+    For conversations that have per-request rows in the `requests` table,
+    cost is distributed proportionally across the days when requests were
+    actually made (request count as weight).  This correctly spreads a
+    multi-day conversation's cost rather than piling it all on the start day.
+
+    For conversations with no per-request data, cost falls back to first_ts.
+
+    tz_offset_min: browser UTC offset in minutes (e.g. -420 for PDT UTC-7),
+    used to align day boundaries with local midnight.
 
     Returns:
         {
@@ -1300,41 +1514,86 @@ def _daily_data(from_date: str | None, until_date: str | None) -> dict:
     if not db_path.exists():
         return {"days": {}, "repos": []}
 
-    params: list = []
-    where_clauses = ["estimated_cost_usd IS NOT NULL", "estimated_cost_usd > 0"]
+    offset_secs = tz_offset_min * 60
+    tz_modifier = f"+{offset_secs} seconds" if offset_secs >= 0 else f"{offset_secs} seconds"
 
+    # Build date-range ms bounds (applied to request timestamps for part 1,
+    # and to first_ts for part 2 fallback)
+    from datetime import datetime as _dt, timedelta as _td, timezone as _tz
+    from_ms: int | None = None
+    until_ms: int | None = None
     if from_date:
-        # Convert YYYY-MM-DD → ms timestamp (start of day UTC)
-        from datetime import datetime as _dt
-        ts_ms = int(_dt.strptime(from_date, "%Y-%m-%d").replace(
-            tzinfo=__import__("datetime").timezone.utc
-        ).timestamp() * 1000)
-        where_clauses.append("first_ts >= ?")
-        params.append(ts_ms)
-
+        from_ms = int(_dt.strptime(from_date, "%Y-%m-%d").replace(tzinfo=_tz.utc).timestamp() * 1000)
     if until_date:
-        from datetime import datetime as _dt
-        from datetime import timedelta as _td
-        ts_ms = int((_dt.strptime(until_date, "%Y-%m-%d").replace(
-            tzinfo=__import__("datetime").timezone.utc
-        ) + _td(days=1)).timestamp() * 1000)
-        where_clauses.append("first_ts < ?")
-        params.append(ts_ms)
-
-    where = " AND ".join(where_clauses)
+        until_ms = int((_dt.strptime(until_date, "%Y-%m-%d").replace(tzinfo=_tz.utc) + _td(days=1)).timestamp() * 1000)
 
     con = _sqlite3.connect(f"file:{db_path}?mode=ro", uri=True, check_same_thread=False)
     try:
-        rows = con.execute(f"""
-            SELECT
-                date(first_ts / 1000, 'unixepoch') AS day,
-                COALESCE(repo_path, '__unattributed__') AS repo,
-                SUM(estimated_cost_usd) AS cost
-            FROM conversations
-            WHERE {where}
+        # ── Part 1: conversations with per-request timestamps ──────────────────
+        # Distribute each conversation's total cost proportionally by how many
+        # requests occurred on each day.
+        req_range_clauses = ["r.created_at IS NOT NULL"]
+        req_params: list = [tz_modifier]
+        if from_ms:
+            req_range_clauses.append("r.created_at >= ?")
+            req_params.append(from_ms)
+        if until_ms:
+            req_range_clauses.append("r.created_at < ?")
+            req_params.append(until_ms)
+        req_where = " AND ".join(req_range_clauses)
+
+        rows_req = con.execute(f"""
+            WITH req_totals AS (
+                SELECT conv_id, COUNT(*) AS total_reqs
+                FROM requests
+                WHERE created_at IS NOT NULL
+                GROUP BY conv_id
+            ),
+            daily_reqs AS (
+                SELECT r.conv_id,
+                       date(r.created_at / 1000, 'unixepoch', ?) AS day,
+                       COUNT(*) AS day_reqs
+                FROM requests r
+                WHERE {req_where}
+                GROUP BY r.conv_id, day
+            )
+            SELECT d.day,
+                   COALESCE(c.repo_path, '__unattributed__') AS repo,
+                   SUM(c.estimated_cost_usd * CAST(d.day_reqs AS REAL) / rt.total_reqs) AS cost
+            FROM daily_reqs d
+            JOIN conversations c ON d.conv_id = c.conv_id
+            JOIN req_totals rt ON d.conv_id = rt.conv_id
+            WHERE c.estimated_cost_usd > 0
+            GROUP BY d.day, repo
+            ORDER BY d.day, repo
+        """, req_params).fetchall()
+
+        # ── Part 2: conversations with no per-request data → use first_ts ──────
+        fb_clauses = [
+            "c.estimated_cost_usd > 0",
+            "c.first_ts IS NOT NULL",
+            "NOT EXISTS (SELECT 1 FROM requests r WHERE r.conv_id = c.conv_id AND r.created_at IS NOT NULL)",
+        ]
+        fb_params: list = [tz_modifier]
+        if from_ms:
+            fb_clauses.append("c.first_ts >= ?")
+            fb_params.append(from_ms)
+        if until_ms:
+            fb_clauses.append("c.first_ts < ?")
+            fb_params.append(until_ms)
+        fb_where = " AND ".join(fb_clauses)
+
+        rows_fb = con.execute(f"""
+            SELECT date(c.first_ts / 1000, 'unixepoch', ?) AS day,
+                   COALESCE(c.repo_path, '__unattributed__') AS repo,
+                   SUM(c.estimated_cost_usd) AS cost
+            FROM conversations c
+            WHERE {fb_where}
             GROUP BY day, repo
             ORDER BY day, repo
-        """, params).fetchall()
+        """, fb_params).fetchall()
+
+        rows = list(rows_req) + list(rows_fb)
     finally:
         con.close()
 
@@ -1484,8 +1743,9 @@ class Handler(BaseHTTPRequestHandler):
             try:
                 length = int(self.headers.get("Content-Length", 0))
                 payload = json.loads(self.rfile.read(length)) if length else {}
+                tz_offset = int(payload.get("tzOffset", 0))
                 body = json.dumps(
-                    _daily_data(payload.get("from"), payload.get("until")),
+                    _daily_data(payload.get("from"), payload.get("until"), tz_offset),
                     ensure_ascii=False,
                 ).encode()
                 self._send(200, "application/json", body)
